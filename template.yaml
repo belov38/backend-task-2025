@@ -1,0 +1,28 @@
+# template.yaml
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Resources:
+  AnalyzeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handler.lambda_handler
+      Runtime: python3.12
+      Timeout: 15
+      MemorySize: 1024  # Больше CPU для параллелизма
+      Environment:
+        Variables:
+          CHUNK_SIZE: '35'
+          MAX_WORKERS: '10'
+          MODEL_ID: 'amazon.nova-lite-v1:0'
+          BEDROCK_REGION: 'us-east-1'
+          MAX_TOKENS: '1500'
+          TEMPERATURE: '0'
+          STOP_SEQUENCE: '}]}'
+      Events:
+        AnalyzeApi:
+          Type: Api
+          Properties:
+            Path: /analyze
+            Method: post

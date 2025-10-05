@@ -1,0 +1,47 @@
+# AWS SAM
+.aws-sam/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+
+# Environment variables
+.env
+.env.local
+
+# Logs
+*.log
+
+# Deployment packages
+*.zip
+
+# Temporary files
+*.tmp
+.cache/
