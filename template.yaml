@@ -10,7 +10,7 @@ Resources:
       Handler: handler.lambda_handler
       Runtime: python3.12
       Timeout: 15
-      MemorySize: 1024  # Больше CPU для параллелизма
+      MemorySize: 1024  
       Environment:
         Variables:
           CHUNK_SIZE: '35'
