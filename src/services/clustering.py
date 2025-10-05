@@ -2,13 +2,23 @@ import json
 import os
 import re
 import time
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Union
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from aws_lambda_powertools import Logger
 from models.response import AnalysisResponse, Cluster
 from models.request import AnalysisRequest, Sentence
 
 logger = Logger(child=True)
+
+# Constants
+CLUSTERS_KEY = "clusters"
+TITLE_KEY = "title"
+SENTIMENT_KEY = "sentiment"
+SENTENCES_KEY = "sentences"
+KEY_INSIGHTS_KEY = "keyInsights"
+SENTIMENT_NEGATIVE = "negative"
+SENTIMENT_POSITIVE = "positive"
+SENTIMENT_NEUTRAL = "neutral"
 
 
 class ClusteringService:
@@ -102,11 +112,17 @@ class ClusteringService:
 
 Cluster {len(sentences)} sentences. Max 2 groups.
 
+Rules:
+- Sentiment must be one of: "positive", "negative", "neutral".
+- "sentences" must be a list of sentence ids exactly as provided in brackets.
+
+Input:
 {sentences_text}
 
-{{"clusters":[{{"title":"Name","sentiment":"neg","sentences":["id"],"keyInsights":["Brief"]}}]}}
+Response JSON example (structure only, replace values):
+{{"clusters":[{{"title":"Name","sentiment":"negative","sentences":["id"],"keyInsights":["Brief"]}}]}}
 
-ONLY JSON ABOVE. NO OTHER TEXT."""
+ONLY RETURN THE JSON OBJECT. NO OTHER TEXT."""
         
         try:
             bedrock_start = time.time()
@@ -153,19 +169,40 @@ ONLY JSON ABOVE. NO OTHER TEXT."""
                     "error": str(e),
                 },
             )
-            return {"clusters": []}
+            return {CLUSTERS_KEY: []}
     
     def _single_cluster(self, request) -> AnalysisResponse:
         """Single model call for small datasets."""
         result = self._cluster_chunk(request.baseline, request.theme, 0)
-        clusters = [Cluster(**c) for c in result.get("clusters", [])]
+        clusters = [Cluster(**c) for c in result.get(CLUSTERS_KEY, [])]
         return AnalysisResponse(clusters=clusters)
     
+    @staticmethod
+    def _normalize_to_string_list(value: Any) -> List[str]:
+        """Convert a value to a list of strings, handling edge cases.
+        
+        Args:
+            value: Can be a string, list, or other type
+            
+        Returns:
+            List of strings. Empty list if value is invalid.
+        """
+        if isinstance(value, str):
+            return [value]
+        elif isinstance(value, list):
+            return [item for item in value if isinstance(item, str)]
+        else:
+            return []
+    
     def _merge_clusters(self, chunk_results: List[Dict[str, Any]]) -> List[Cluster]:
-        """Merge sub-clusters by title and sentiment, deduplicating insights."""
+        """Merge sub-clusters by title, deduplicating insights and sentences.
+        
+        Clusters with the same title (case-insensitive) are merged together.
+        Sentiment priority: negative > positive (most conservative approach).
+        """
         all_clusters: List[Dict[str, Any]] = []
         for result in chunk_results:
-            all_clusters.extend(result.get("clusters", []))
+            all_clusters.extend(result.get(CLUSTERS_KEY, []))
 
         if not all_clusters:
             return []
@@ -173,45 +210,129 @@ ONLY JSON ABOVE. NO OTHER TEXT."""
         merged_map: Dict[str, Dict[str, Any]] = {}
 
         for cluster in all_clusters:
-            title_key = cluster["title"].lower().strip()
+            title_key = cluster[TITLE_KEY].lower().strip()
 
             if title_key not in merged_map:
+                # Initialize new cluster entry
                 merged_map[title_key] = {
-                    "title": cluster["title"],
-                    "sentiment": cluster["sentiment"],
-                    "sentences": list(cluster["sentences"]),
-                    "keyInsights": list(cluster["keyInsights"]),
+                    TITLE_KEY: cluster[TITLE_KEY],
+                    SENTIMENT_KEY: cluster[SENTIMENT_KEY],
+                    SENTENCES_KEY: list(cluster[SENTENCES_KEY]),
+                    KEY_INSIGHTS_KEY: list(cluster[KEY_INSIGHTS_KEY]),
                 }
             else:
-                merged_map[title_key]["sentences"].extend(cluster["sentences"])
-
-                for insight in cluster["keyInsights"]:
-                    if insight not in merged_map[title_key]["keyInsights"]:
-                        merged_map[title_key]["keyInsights"].append(insight)
-
-                if cluster["sentiment"] == "negative":
-                    merged_map[title_key]["sentiment"] = "negative"
+                # Merge into existing cluster
+                existing = merged_map[title_key]
+                existing[SENTENCES_KEY].extend(cluster[SENTENCES_KEY])
+                
+                # Add unique insights only
+                for insight in cluster[KEY_INSIGHTS_KEY]:
+                    if insight not in existing[KEY_INSIGHTS_KEY]:
+                        existing[KEY_INSIGHTS_KEY].append(insight)
+                
+                # Negative sentiment takes precedence (conservative approach)
+                if cluster[SENTIMENT_KEY] == SENTIMENT_NEGATIVE:
+                    existing[SENTIMENT_KEY] = SENTIMENT_NEGATIVE
 
         return [Cluster(**data) for data in merged_map.values()]
     
     def _parse_json(self, text: str) -> Dict[str, Any]:
-        """Extract JSON from the model response and parse into a dict.
+        """Extract and normalize JSON from the model response.
 
-        Tolerates optional markdown code fences and extracts the top-level
-        object containing the "clusters" key.
+        Handles markdown code fences, extracts the JSON object, and normalizes
+        field types to ensure consistency.
+        
+        Returns:
+            Dict with 'clusters' key containing list of normalized cluster dicts.
+            Returns empty clusters list on parse failure.
         """
-        text = re.sub(r"```json\s*", "", text)
-        text = re.sub(r"```\s*", "", text)
-
+        # Remove markdown code fences
+        text = re.sub(r"```(?:json)?\s*", "", text)
+        
+        # Extract JSON object containing clusters
         match = re.search(r'\{.*"clusters".*\}', text, re.DOTALL)
         if match:
             text = match.group(0)
 
         try:
-            return json.loads(text.strip())
+            data: Dict[str, Any] = json.loads(text.strip())
+            clusters = data.get(CLUSTERS_KEY)
+            
+            if not isinstance(clusters, list):
+                return {CLUSTERS_KEY: []}
+
+            normalized: List[Dict[str, Any]] = []
+            for cluster in clusters:
+                normalized_cluster = self._normalize_cluster(cluster)
+                if normalized_cluster:
+                    normalized.append(normalized_cluster)
+
+            return {CLUSTERS_KEY: normalized}
+            
         except json.JSONDecodeError as e:
             logger.warning(
                 "JSON parse failed",
                 extra={"error": str(e), "sample": text[:200]},
             )
-            return {"clusters": []}
+            return {CLUSTERS_KEY: []}
+    
+    def _normalize_cluster(self, cluster: Any) -> Union[Dict[str, Any], None]:
+        """Normalize a single cluster dict, ensuring correct field types.
+        
+        Args:
+            cluster: Raw cluster data from model response
+            
+        Returns:
+            Normalized cluster dict or None if invalid
+        """
+        if not isinstance(cluster, dict):
+            return None
+        
+        title = cluster.get(TITLE_KEY)
+        sentiment = cluster.get(SENTIMENT_KEY)
+        
+        # Both title and sentiment must be strings
+        if not isinstance(title, str) or not isinstance(sentiment, str):
+            return None
+        
+        sentences = self._normalize_to_string_list(cluster.get(SENTENCES_KEY, []))
+        key_insights = self._normalize_to_string_list(cluster.get(KEY_INSIGHTS_KEY, []))
+        normalized_sentiment = self._normalize_sentiment(sentiment)
+        
+        return {
+            TITLE_KEY: title,
+            SENTIMENT_KEY: normalized_sentiment,
+            SENTENCES_KEY: sentences,
+            KEY_INSIGHTS_KEY: key_insights,
+        }
+
+    @staticmethod
+    def _normalize_sentiment(value: str) -> str:
+        """Map arbitrary sentiment strings to allowed values.
+
+        Allowed output values: "positive", "negative", "neutral".
+        Unknown values default to "neutral".
+        """
+        if not isinstance(value, str):
+            return SENTIMENT_NEUTRAL
+
+        normalized = value.strip().lower()
+
+        negative_aliases = {
+            "neg", "negative", "bad", "poor", "unfavorable", "unfavourable",
+            "sad", "angry", "detrimental", "unhappy"
+        }
+        positive_aliases = {
+            "pos", "positive", "good", "great", "excellent", "favorable", "favourable",
+            "happy", "satisfied"
+        }
+        neutral_aliases = {"neutral", "mixed", "mixed/neutral", "mixed neutral", "okay", "ok"}
+
+        if normalized in negative_aliases:
+            return SENTIMENT_NEGATIVE
+        if normalized in positive_aliases:
+            return SENTIMENT_POSITIVE
+        if normalized in neutral_aliases:
+            return SENTIMENT_NEUTRAL
+
+        return SENTIMENT_NEUTRAL
