@@ -51,8 +51,16 @@ class ClusteringService:
         """
         total_start = time.time()
 
+        # Build set of valid input sentence IDs for validation
+        valid_ids = {s.id for s in request.baseline}
+        
+        # Get LLM output validation mode from env
+        llm_validation_mode = os.getenv("LLM_OUTPUT_VALIDATION", "strict").lower()
+
         if len(request.baseline) <= self.chunk_size:
-            return self._single_cluster(request)
+            response = self._single_cluster(request)
+            response = self._validate_and_filter_output_sentence_ids(response, valid_ids, llm_validation_mode)
+            return response
 
         chunks = self._chunk_sentences(request.baseline)
         logger.append_keys(total_sentences=len(request.baseline), total_chunks=len(chunks))
@@ -92,7 +100,9 @@ class ClusteringService:
             },
         )
 
-        return AnalysisResponse(clusters=merged_clusters)
+        response = AnalysisResponse(clusters=merged_clusters)
+        response = self._validate_and_filter_output_sentence_ids(response, valid_ids, llm_validation_mode)
+        return response
     
     def _chunk_sentences(self, sentences: List[Sentence]) -> List[List[Sentence]]:
         """Split sentences into equal-sized chunks respecting CHUNK_SIZE."""
@@ -336,3 +346,65 @@ ONLY RETURN THE JSON OBJECT. NO OTHER TEXT."""
             return SENTIMENT_NEUTRAL
 
         return SENTIMENT_NEUTRAL
+
+    @staticmethod
+    def _validate_and_filter_output_sentence_ids(response: AnalysisResponse, valid_ids: set, mode: str = 'strict') -> AnalysisResponse:
+        """Validate and optionally filter sentence IDs in the response.
+
+        Args:
+            response: The analysis response to validate
+            valid_ids: Set of valid sentence IDs from the input
+            mode: 'strict' (raise error) or 'soft' (filter invalid IDs)
+
+        Returns:
+            AnalysisResponse with filtered clusters (in soft mode) and unprocessedSentences
+
+        Raises:
+            ValueError: If any sentence ID is invalid (strict mode only)
+        """
+        invalid_ids = []
+        processed_ids = set()
+        
+        # Collect all sentence IDs from clusters and find invalid ones
+        for cluster in response.clusters:
+            for sentence_id in cluster.sentences:
+                if sentence_id not in valid_ids:
+                    invalid_ids.append(sentence_id)
+                else:
+                    processed_ids.add(sentence_id)
+        
+        if invalid_ids:
+            logger.warning(
+                "LLM output contains invalid sentence IDs",
+                extra={
+                    "invalid_ids": list(set(invalid_ids))[:10],
+                    "total_invalid": len(set(invalid_ids)),
+                    "mode": mode
+                }
+            )
+            
+            if mode == 'strict':
+                raise ValueError(
+                    f"LLM returned sentence IDs not present in input. "
+                    f"Found {len(set(invalid_ids))} invalid IDs. "
+                    f"Sample: {list(set(invalid_ids))[:5]}"
+                )
+            
+            # Soft mode: filter out invalid IDs from clusters
+            for cluster in response.clusters:
+                cluster.sentences = [sid for sid in cluster.sentences if sid in valid_ids]
+        
+        # Find unprocessed sentences
+        unprocessed = valid_ids - processed_ids
+        if unprocessed:
+            logger.info(
+                "Some sentences were not processed by LLM",
+                extra={
+                    "unprocessed_count": len(unprocessed),
+                    "total_input": len(valid_ids),
+                    "coverage_percent": round((len(processed_ids) / len(valid_ids)) * 100, 2)
+                }
+            )
+            response.unprocessedSentences = sorted(list(unprocessed))
+        
+        return response

@@ -1,4 +1,3 @@
-# template.yaml
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 
@@ -13,13 +12,19 @@ Resources:
       MemorySize: 1024  
       Environment:
         Variables:
-          CHUNK_SIZE: '35'
+          CHUNK_SIZE: '20'
           MAX_WORKERS: '10'
           MODEL_ID: 'amazon.nova-lite-v1:0'
           BEDROCK_REGION: 'us-east-1'
           MAX_TOKENS: '1500'
           TEMPERATURE: '0'
           STOP_SEQUENCE: '}]}'
+          # VALIDATION_MODE: 'strict'  
+          VALIDATION_MODE: 'dedup'
+          
+          # LLM_OUTPUT_VALIDATION: 'strict'  
+          LLM_OUTPUT_VALIDATION: 'soft'  
+          
       Events:
         AnalyzeApi:
           Type: Api
